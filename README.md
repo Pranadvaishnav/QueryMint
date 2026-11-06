@@ -10,7 +10,20 @@ QueryMint lets a buyer query publisher-owned Arkiv datasets in one request and s
 
 The local coordinator milestone adds Arkiv-backed publisher/dataset discovery, an owner-checked query and signed quote endpoint, publisher approval handoff for high-value allocations, settlement status verification, post-settlement delivery, event-derived earnings, and matching buyer SDK routes. The existing publisher authorization and settlement contract, Foundry tests, shared EIP-712 helpers, Arkiv schemas/encryption/query logic, and roundtrip writer are preserved. API and Arkiv-helper tests use mocks; see [WHITECHAIN_FEEDBACK.md](WHITECHAIN_FEEDBACK.md) for the boundary between read-only token verification and unperformed state-changing checks.
 
-The real testnet vertical slice is not yet complete: the Arkiv roundtrip has not been run, there is no deployed settlement address, and no live USDT settlement has been made. The publisher/buyer user interfaces are pending. No live transaction is represented as successful.
+The live testnet vertical slice is not yet complete: the Arkiv roundtrip has not been run, no QueryMint settlement deployment is configured, and no live USDT settlement has been made. The UI only displays responses from the coordinator; empty states are used when live data is unavailable. See [live validation](docs/live-validation.md) for the observed RPC checks and exact blockers.
+
+## Run the applications
+
+Install the pinned workspace dependencies, copy `.env.example` to `.env`, then configure the server-side values before starting the coordinator. Do not place Arkiv access keys, private keys, or `DEMO_ENCRYPTION_KEY` in any `VITE_*` variable.
+
+```powershell
+npm install
+npm run dev:coordinator
+npm run dev:web
+npm run dev:demo
+```
+
+The buyer/publisher dashboard is at `http://localhost:5173`; the separate SDK demo is at `http://localhost:5174`. The frontend reads `VITE_COORDINATOR_API_URL` and `VITE_QUERYMINT_SETTLEMENT_ADDRESS`; the coordinator uses the non-Vite `.env` secrets. Without coordinator credentials and a deployed settlement contract, the apps show API errors/empty states rather than fabricated records or transactions.
 
 ## Buyer SDK shape
 
@@ -33,7 +46,8 @@ console.log(result.records, result.transactionHash);
 - [x] Direct local settlement gas measurements for 1/1, 2/4, and 5/50 publisher/record batches.
 - [x] Buyer SDK API surface for quote, exact approval, settlement, and post-receipt delivery.
 - [x] Coordinator discovery, quote, signature, status, delivery, and event-derived earnings endpoints; mocked coordinator/Arkiv tests.
-- [ ] Buyer and publisher apps.
+- [x] Buyer marketplace and signed quote/payment/delivery UI, read-only publisher datasets/permissions/earnings view, and separate SDK demo.
+- [ ] Publisher dataset registration/policy editor and secure Arkiv record authoring workflow.
 - [ ] Real Arkiv two-publisher write/query and live Whitechain settlement (requires Arkiv access key and funded test wallets).
 - [ ] Deployment, explorer links, lifecycle receipts, and demo video script.
 

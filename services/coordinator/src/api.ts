@@ -173,7 +173,8 @@ export function createCoordinatorApp(deps: CoordinatorDependencies): Express {
       const block = await deps.whitechainClient.getBlock({ blockNumber: await deps.whitechainClient.getBlockNumber() });
       if (onChainPublisher.toLowerCase() !== publisher.toLowerCase() || !policy[6] || !grant[2] || block.timestamp >= policy[4] || block.timestamp >= grant[0]) continue;
       results.push({ datasetId: id, publisher, category: row.category.value, title: row.title.value, description: row.description.value,
-        pricePerRecord: policy[0].toString(), maxRecordsPerQuery: policy[3], maxPayoutPerQuery: policy[1].toString(), policyExpiresAt: policy[4].toString() });
+        pricePerRecord: policy[0].toString(), maxRecordsPerQuery: policy[3], maxPayoutPerQuery: policy[1].toString(), policyExpiresAt: policy[4].toString(),
+        coordinator: deps.coordinatorAccount.address, coordinatorGrantExpiresAt: grant[0].toString() });
     }
     return results;
   }

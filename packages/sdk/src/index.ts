@@ -15,6 +15,7 @@ export interface QueryMintQuote {
   records: Array<{ publisher: Address; datasetId: Hex; recordHash: Hex; preview: string; [key: string]: unknown }>;
   breakdown: Array<{ publisher: Address; datasetId: Hex; recordCount: number; pricePerRecord: string; payoutAmount: string }>;
   publisherApprovalRequests?: Array<{ publisher: Address; datasetId: Hex; domain: unknown; types: unknown; primaryType: string; message: Record<string, unknown> }>;
+  approvalsMissing?: Hex[];
 }
 
 export interface CreateQueryMintOptions {
@@ -77,14 +78,19 @@ export function createQueryMint(options: CreateQueryMintOptions) {
       if (!response.ok) throw new Error(`Publisher approval submission failed (${response.status}): ${await response.text()}`);
       return response.json() as Promise<{ queryId: Hex; datasetId: Hex; approved: boolean }>;
     },
+    async refreshQuote(input: { quote: QueryMintQuote }): Promise<QueryMintQuote> {
+      const response = await request(`${apiUrl}/query/${input.quote.quoteId}/quote`);
+      if (!response.ok) throw new Error(`Unable to refresh quote (${response.status}): ${await response.text()}`);
+      const latest = await response.json() as any;
+      return reviveQuote({ ...input.quote, manifest: latest.manifest, approvalsMissing: latest.approvalsMissing,
+        publisherApprovalRequests: (input.quote.publisherApprovalRequests ?? []).filter((request) => latest.approvalsMissing?.includes(request.datasetId.toLowerCase())) });
+    },
     async pay(input: { quote: QueryMintQuote }) {
       const account = options.walletClient.account;
       if (!account) throw new Error("walletClient must have an account");
-      const latestResponse = await request(`${apiUrl}/query/${input.quote.quoteId}/quote`);
-      if (!latestResponse.ok) throw new Error(`Unable to refresh quote (${latestResponse.status}): ${await latestResponse.text()}`);
-      const latest = await latestResponse.json() as any;
-      if (latest.approvalsMissing?.length) throw new Error(`Publisher approvals are still required for: ${latest.approvalsMissing.join(", ")}`);
-      const quote = { ...input.quote, manifest: reviveQuote({ ...input.quote, manifest: latest.manifest }).manifest };
+      if (account.address.toLowerCase() !== input.quote.manifest.buyer.toLowerCase()) throw new Error("The connected wallet is not the buyer named in this quote");
+      const quote = await this.refreshQuote(input);
+      if (quote.approvalsMissing?.length) throw new Error(`Publisher approvals are still required for: ${quote.approvalsMissing.join(", ")}`);
       if (quote.settlementAddress.toLowerCase() !== options.settlementAddress.toLowerCase()) throw new Error("Quote settlement address does not match SDK configuration");
       const chainId = await options.walletClient.getChainId();
       if (chainId !== 1874 || quote.manifest.token.toLowerCase() !== WHITECHAIN_USDT.toLowerCase()) {

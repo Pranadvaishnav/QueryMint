@@ -16,6 +16,8 @@
     "test:contracts": "node node_modules/@foundry-rs/forge/bin.mjs test --root packages/contracts -vvv",
     "test:coordinator": "npm run test --workspace @querymint/coordinator",
     "dev:coordinator": "npm run dev --workspace @querymint/coordinator",
+    "dev:web": "npm run dev --workspace @querymint/web",
+    "dev:demo": "npm run dev --workspace @querymint/demo",
     "snapshot:gas": "node node_modules/@foundry-rs/forge/bin.mjs snapshot --root packages/contracts --snap packages/contracts/.gas-snapshot"
   },
   "devDependencies": {
