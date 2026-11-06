@@ -242,6 +242,16 @@ test("discovery failures log only safe metadata and retain the 503 response", as
     assert.equal(logLine.includes("secret-access-key"), false);
     assert.equal(logLine.includes("plaintext-marker"), false);
     assert.equal(logLine.includes("rpc.invalid"), false);
+    const responseDiagnostic = response.headers.get("x-querymint-discovery-diagnostic") ?? "";
+    const diagnostic = JSON.parse(responseDiagnostic);
+    assert.equal(diagnostic.requestId, `railway-${index + 1}`);
+    assert.equal(diagnostic.stage, scenario.stage);
+    assert.equal(diagnostic.errorName, "Error");
+    assert.equal(diagnostic.status, 503);
+    assert.equal(diagnostic.code, "UPSTREAM_UNAVAILABLE");
+    assert.equal(responseDiagnostic.includes("secret-access-key"), false);
+    assert.equal(responseDiagnostic.includes("plaintext-marker"), false);
+    assert.equal(responseDiagnostic.includes("rpc.invalid"), false);
   }
 });
 

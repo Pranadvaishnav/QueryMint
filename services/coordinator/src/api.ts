@@ -333,8 +333,12 @@ export function createCoordinatorApp(deps: CoordinatorDependencies): Express {
   const discoveryFailure = (req: Request, res: Response, route: string, resource: string, error: unknown) => {
     const stageError = error instanceof DiscoveryStageError ? error : undefined;
     const original = stageError?.original ?? error;
-    console.error(JSON.stringify({ event: "discovery_failed", requestId: safeRequestId(req), route,
-      stage: stageError?.stage ?? "discovery_processing", ...safeDiscoveryErrorMetadata(error) }));
+    const stage = stageError?.stage ?? "discovery_processing";
+    const errorMetadata = safeDiscoveryErrorMetadata(error);
+    const requestId = safeRequestId(req);
+    console.error(JSON.stringify({ event: "discovery_failed", requestId, route, stage, ...errorMetadata }));
+    // Public, structured fallback when deploy logs cannot be reached. Only fixed stage labels and sanitized metadata are exposed.
+    res.setHeader("X-QueryMint-Discovery-Diagnostic", JSON.stringify({ requestId, stage, ...errorMetadata }));
     if (original instanceof IncompleteArkivScanError) return res.status(503).json({ error: original.message, code: original.code, retryable: true });
     return res.status(503).json({ error: `${resource} discovery is temporarily unavailable. Retry shortly.`, code: "DISCOVERY_UNAVAILABLE", retryable: true });
   };
