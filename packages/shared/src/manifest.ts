@@ -3,6 +3,7 @@ import {
   encodeAbiParameters,
   hashTypedData,
   keccak256,
+  toBytes,
   type Address,
   type Hex,
 } from "viem";
@@ -79,26 +80,26 @@ export const publisherApprovalTypes = {
   ],
 } as const;
 
+const allocationTypeHash = keccak256(toBytes(
+  "Allocation(address publisher,bytes32 datasetId,uint64 publisherNonce,uint64 policyNonce,uint64 grantNonce,uint32 recordCount,bytes32 recordHashesHash,uint128 payoutAmount)",
+));
+
 export function hashRecordHashes(recordHashes: readonly Hex[]): Hex {
   return keccak256(encodeAbiParameters([{ type: "bytes32[]" }], [recordHashes]));
 }
 
 export function hashAllocation(domain: Eip712Domain, allocation: Allocation): Hex {
-  return hashTypedData({
-    domain,
-    types: allocationTypes,
-    primaryType: "Allocation",
-    message: {
-      publisher: allocation.publisher,
-      datasetId: allocation.datasetId,
-      publisherNonce: allocation.publisherNonce,
-      policyNonce: allocation.policyNonce,
-      grantNonce: allocation.grantNonce,
-      recordCount: allocation.recordCount,
-      recordHashesHash: hashRecordHashes(allocation.recordHashes),
-      payoutAmount: allocation.payoutAmount,
-    },
-  });
+  // Solidity hashes each Allocation as an EIP-712 struct hash inside the parent
+  // QueryManifest. The domain separator is applied once to QueryManifest only.
+  void domain;
+  return keccak256(encodeAbiParameters(
+    [
+      { type: "bytes32" }, { type: "address" }, { type: "bytes32" }, { type: "uint64" },
+      { type: "uint64" }, { type: "uint64" }, { type: "uint32" }, { type: "bytes32" }, { type: "uint128" },
+    ],
+    [allocationTypeHash, allocation.publisher, allocation.datasetId, allocation.publisherNonce, allocation.policyNonce,
+      allocation.grantNonce, allocation.recordCount, hashRecordHashes(allocation.recordHashes), allocation.payoutAmount],
+  ));
 }
 
 export function hashAllocations(domain: Eip712Domain, allocations: readonly Allocation[]): Hex {

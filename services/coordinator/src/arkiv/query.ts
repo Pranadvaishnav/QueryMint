@@ -65,6 +65,15 @@ export interface VerifiedRecord {
   label: string;
   preview: string;
   payload: unknown;
+  pricePerRecord: bigint;
+  maxPayoutPerQuery: bigint;
+  maxRecordsPerQuery: number;
+  publisherNonce: bigint;
+  policyNonce: bigint;
+  grantNonce: bigint;
+  policyExpiresAt: bigint;
+  grantExpiresAt: bigint;
+  publisherSignatureThreshold: bigint;
 }
 
 export interface QueryArkivRecordsOptions {
@@ -119,14 +128,14 @@ export async function queryAuthorizedRecords(options: QueryArkivRecordsOptions):
         whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "datasetPolicies", args: [datasetId] }),
         whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "coordinatorGrants", args: [datasetId, coordinator] }),
       ]);
-      const [payout, , publisherRegistered] = await whitechainClient.readContract({
+      const [payout, publisherNonce, publisherRegistered] = await whitechainClient.readContract({
         address: settlementAddress,
         abi: settlementReadAbi,
         functionName: "publishers",
         args: [publisher],
       });
-      const [, , , , policyExpiry, , policyActive] = policy;
-      const [grantExpiry, , grantActive] = grant;
+      const [pricePerRecord, maxPayoutPerQuery, publisherSignatureThreshold, maxRecordsPerQuery, policyExpiry, policyNonce, policyActive] = policy;
+      const [grantExpiry, grantNonce, grantActive] = grant;
       if (
         !publisherRegistered ||
         !policyActive ||
@@ -159,6 +168,15 @@ export async function queryAuthorizedRecords(options: QueryArkivRecordsOptions):
         label: row.label.value,
         preview: row.preview.value,
         payload: JSON.parse(plaintext) as unknown,
+        pricePerRecord,
+        maxPayoutPerQuery,
+        maxRecordsPerQuery,
+        publisherNonce,
+        policyNonce,
+        grantNonce,
+        policyExpiresAt: policyExpiry,
+        grantExpiresAt: grantExpiry,
+        publisherSignatureThreshold,
       });
       if (records.length >= maxRecords) break;
     }

@@ -1,5 +1,4 @@
 import {
-  encodeFunctionData,
   type Address,
   type Hex,
   type PublicClient,
@@ -15,6 +14,7 @@ export interface QueryMintQuote {
   settlementAddress: Address;
   records: Array<{ publisher: Address; datasetId: Hex; recordHash: Hex; preview: string; [key: string]: unknown }>;
   breakdown: Array<{ publisher: Address; datasetId: Hex; recordCount: number; pricePerRecord: string; payoutAmount: string }>;
+  publisherApprovalRequests?: Array<{ publisher: Address; datasetId: Hex; domain: unknown; types: unknown; primaryType: string; message: Record<string, unknown> }>;
 }
 
 export interface CreateQueryMintOptions {
@@ -50,34 +50,59 @@ const erc20Abi = [{
 export function createQueryMint(options: CreateQueryMintOptions) {
   const request = options.fetch ?? fetch;
   const apiUrl = options.apiUrl.replace(/\/$/, "");
+  const reviveQuote = (quote: any): QueryMintQuote => {
+    quote.manifest.totalAmount = BigInt(quote.manifest.totalAmount);
+    quote.manifest.deadline = BigInt(quote.manifest.deadline);
+    quote.manifest.allocations = quote.manifest.allocations.map((allocation: any) => ({
+      ...allocation,
+      publisherNonce: BigInt(allocation.publisherNonce), policyNonce: BigInt(allocation.policyNonce),
+      grantNonce: BigInt(allocation.grantNonce), payoutAmount: BigInt(allocation.payoutAmount),
+    }));
+    return quote as QueryMintQuote;
+  };
   return {
     async quote(input: { where: { category: string }; limit?: number }): Promise<QueryMintQuote> {
-      const response = await request(`${apiUrl}/v1/quotes`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+      const buyer = options.walletClient.account?.address;
+      if (!buyer) throw new Error("walletClient must have an account before requesting a quote");
+      const response = await request(`${apiUrl}/query/quote`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...input, buyer }),
       });
       if (!response.ok) throw new Error(`QueryMint quote failed (${response.status}): ${await response.text()}`);
-      return response.json() as Promise<QueryMintQuote>;
+      return reviveQuote(await response.json());
+    },
+    async submitPublisherApproval(input: { quoteId: Hex; datasetId: Hex; signature: Hex }) {
+      const response = await request(`${apiUrl}/query/${input.quoteId}/publisher-approval`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ datasetId: input.datasetId, signature: input.signature }),
+      });
+      if (!response.ok) throw new Error(`Publisher approval submission failed (${response.status}): ${await response.text()}`);
+      return response.json() as Promise<{ queryId: Hex; datasetId: Hex; approved: boolean }>;
     },
     async pay(input: { quote: QueryMintQuote }) {
       const account = options.walletClient.account;
       if (!account) throw new Error("walletClient must have an account");
+      const latestResponse = await request(`${apiUrl}/query/${input.quote.quoteId}/quote`);
+      if (!latestResponse.ok) throw new Error(`Unable to refresh quote (${latestResponse.status}): ${await latestResponse.text()}`);
+      const latest = await latestResponse.json() as any;
+      if (latest.approvalsMissing?.length) throw new Error(`Publisher approvals are still required for: ${latest.approvalsMissing.join(", ")}`);
+      const quote = { ...input.quote, manifest: reviveQuote({ ...input.quote, manifest: latest.manifest }).manifest };
+      if (quote.settlementAddress.toLowerCase() !== options.settlementAddress.toLowerCase()) throw new Error("Quote settlement address does not match SDK configuration");
       const chainId = await options.walletClient.getChainId();
-      if (chainId !== 1874 || input.quote.manifest.token.toLowerCase() !== WHITECHAIN_USDT.toLowerCase()) {
+      if (chainId !== 1874 || quote.manifest.token.toLowerCase() !== WHITECHAIN_USDT.toLowerCase()) {
         throw new Error("Quote or wallet is not configured for Whitechain Sepolia USDT");
       }
       const approveHash = await options.walletClient.writeContract({
         account, chain: options.walletClient.chain, address: WHITECHAIN_USDT,
-        abi: erc20Abi, functionName: "approve", args: [options.settlementAddress, input.quote.manifest.totalAmount],
+        abi: erc20Abi, functionName: "approve", args: [options.settlementAddress, quote.manifest.totalAmount],
       });
       const approval = await options.publicClient.waitForTransactionReceipt({ hash: approveHash });
       if (approval.status !== "success") throw new Error("USDT approval transaction failed");
-      const txHash = await options.walletClient.sendTransaction({
-        account, chain: options.walletClient.chain, to: options.settlementAddress,
-        data: encodeFunctionData({ abi: settleAbi, functionName: "settle", args: [input.quote.manifest] }),
+      const txHash = await options.walletClient.writeContract({
+        account, chain: options.walletClient.chain, address: options.settlementAddress,
+        abi: settleAbi, functionName: "settle", args: [quote.manifest],
       });
       const receipt = await options.publicClient.waitForTransactionReceipt({ hash: txHash });
       if (receipt.status !== "success") throw new Error(`Settlement transaction failed: ${txHash}`);
-      const delivery = await request(`${apiUrl}/v1/quotes/${input.quote.quoteId}/deliver`, {
+      const delivery = await request(`${apiUrl}/query/${quote.quoteId}/deliver`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ transactionHash: txHash, buyer: account.address }),
       });
