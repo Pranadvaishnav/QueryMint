@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.turbo/
+.vite/
+packages/contracts/cache/
+packages/contracts/out/
+packages/contracts/broadcast/
+packages/contracts/lib/
+packages/contracts/.gas-snapshot
+*.log
+*.tsbuildinfo
