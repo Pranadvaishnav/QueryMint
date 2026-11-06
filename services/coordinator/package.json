@@ -5,21 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch --env-file=../../.env --import tsx src/index.ts",
-    "start": "node --env-file=../../.env --import tsx src/index.ts",
-    "test": "tsx --test test/api.test.ts test/query.test.ts",
-    "arkiv:roundtrip": "tsx scripts/arkiv-roundtrip.ts",
+    "start": "node --import tsx src/index.ts",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx --test test/api.test.ts test/query.test.ts test/arkiv-retry.test.ts test/pagination.test.ts",
+    "arkiv:roundtrip": "node --env-file=../../.env --import tsx scripts/arkiv-roundtrip.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@arkiv-network/sdk": "1.0.1",
     "@querymint/shared": "0.1.0",
     "express": "5.3.0",
+    "tsx": "4.21.0",
     "viem": "2.57.16"
   },
   "devDependencies": {
     "@types/express": "5.0.6",
     "@types/node": "22.19.1",
-    "tsx": "4.21.0",
     "typescript": "5.9.3"
   }
 }

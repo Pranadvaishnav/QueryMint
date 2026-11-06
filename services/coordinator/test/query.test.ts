@@ -25,10 +25,11 @@ async function rowFor(payload: unknown, overrides: { owner?: Address; payloadHas
   };
 }
 
-function client(rowList: any[], state: { owner?: Address; active?: boolean; expiry?: bigint; grantExpiry?: bigint } = {}) {
+function client(rowPages: any[][], state: { owner?: Address; active?: boolean; expiry?: bigint; grantExpiry?: bigint } = {}) {
+  let pageIndex = 0;
   const query = {
     from() { return this; }, where() { return this; }, orderBy() { return this; }, limit() { return this; },
-    async fetch() { return { entities: rowList }; },
+    async fetch() { return { entities: rowPages[pageIndex++] ?? [] }; },
   };
   const arkivClient = { select() { return query; } };
   const whitechainClient = {
@@ -45,42 +46,83 @@ function client(rowList: any[], state: { owner?: Address; active?: boolean; expi
   return { arkivClient, whitechainClient: whitechainClient as any };
 }
 
-async function query(rowList: any[], state: Parameters<typeof client>[1] = {}) {
-  const clients = client(rowList, state);
-  return queryAuthorizedRecords({ arkivClient: clients.arkivClient as any, whitechainClient: clients.whitechainClient, settlementAddress, coordinator, category: "defi", maxRecords: 50, encryptionKey });
+async function query(rowList: any[] | any[][], state: Parameters<typeof client>[1] = {}, options: { pageSize?: number; maxPages?: number } = {}) {
+  const pages = rowList.length && Array.isArray(rowList[0]) ? rowList as any[][] : [rowList as any[], []];
+  const clients = client(pages, state);
+  return queryAuthorizedRecords({ arkivClient: clients.arkivClient as any, whitechainClient: clients.whitechainClient, settlementAddress, coordinator, category: "defi", maxRecords: 50, encryptionKey, ...options });
 }
 
 test("queries encrypted Arkiv record after owner, authorization, and hash checks", async () => {
   const row = await rowFor({ value: 10 });
   const result = await query([row]);
-  assert.equal(result.length, 1);
-  assert.deepEqual(result[0]?.payload, { value: 10 });
-  assert.equal(result[0]?.publisher, publisher);
-  assert.equal(result[0]?.pricePerRecord, 1_000_000n);
+  assert.equal(result.records.length, 1);
+  assert.deepEqual(result.records[0]?.payload, { value: 10 });
+  assert.equal(result.records[0]?.publisher, publisher);
+  assert.equal(result.records[0]?.pricePerRecord, 1_000_000n);
+  assert.equal(result.complete, true);
+  assert.equal(result.totalMatching, 1);
+});
+
+test("two independent publishers decrypt back to their original content hashes", async () => {
+  const secondPublisher = "0x00000000000000000000000000000000000000b2" as Address;
+  const supplied = [
+    { publisher, payload: { owner: "publisher-a", rows: [1, 2] } },
+    { publisher: secondPublisher, payload: { owner: "publisher-b", rows: [3, 4] } },
+  ];
+  for (const item of supplied) {
+    const plaintext = stableJson(item.payload);
+    const encrypted = encryptPayload(encryptionKey, plaintext);
+    const record = (await import("../src/arkiv/encryption.js")).decryptPayload(encryptionKey, bytesToHex(encrypted));
+    assert.deepEqual(JSON.parse(record), item.payload);
+    assert.equal(contentHash(record), contentHash(stableJson(item.payload)));
+  }
 });
 
 test("rejects Arkiv entity whose owner differs from registered dataset publisher", async () => {
   const other = "0x00000000000000000000000000000000000000b2" as Address;
   const row = await rowFor({ value: 10 }, { owner: other });
-  assert.equal((await query([row])).length, 0);
+  assert.equal((await query([row])).records.length, 0);
 });
 
 test("rejects revoked coordinator grants", async () => {
   const row = await rowFor({ value: 10 });
-  assert.equal((await query([row], { active: false })).length, 0);
+  assert.equal((await query([row], { active: false })).records.length, 0);
 });
 
 test("rejects expired grants and datasets", async () => {
   const row = await rowFor({ value: 10 });
-  assert.equal((await query([row], { grantExpiry: 999n })).length, 0);
-  assert.equal((await query([row], { expiry: 999n })).length, 0);
+  assert.equal((await query([row], { grantExpiry: 999n })).records.length, 0);
+  assert.equal((await query([row], { expiry: 999n })).records.length, 0);
 });
 
-test("deduplicates records by plaintext content hash", async () => {
+test("rejects duplicate content hashes within a dataset instead of silently dropping one", async () => {
   const rowA = await rowFor({ value: 10 });
   const rowB = { ...rowA, $key: `0x${"02".repeat(32)}` as Hex };
-  const result = await query([rowA, rowB]);
-  assert.equal(result.length, 1);
+  await assert.rejects(query([rowA, rowB]), /Duplicate content hash/);
+});
+
+test("record scanning follows multiple Arkiv pages and returns deterministic dataset/hash order", async () => {
+  const lowDataset = await rowFor({ value: 10 });
+  const highDataset = { ...await rowFor({ value: 20 }), $key: `0x${"02".repeat(32)}` as Hex, datasetId: { value: `0x${"cd".repeat(32)}` as Hex } };
+  const result = await query([[lowDataset, highDataset], []], {}, { pageSize: 2 });
+  assert.equal(result.complete, true);
+  assert.equal(result.pagesScanned, 2);
+  assert.deepEqual(result.records.map((record) => record.datasetId), [lowDataset.datasetId.value, highDataset.datasetId.value]);
+});
+
+test("a full record scan safety cap is reported as incomplete", async () => {
+  const rowA = await rowFor({ value: 10 });
+  const rowB = { ...await rowFor({ value: 20 }), $key: `0x${"02".repeat(32)}` as Hex };
+  const result = await query([[rowA], [rowB]], {}, { pageSize: 1, maxPages: 1 });
+  assert.equal(result.complete, false);
+  assert.equal(result.pagesScanned, 1);
+  assert.equal(result.totalMatching, 1);
+});
+
+test("rejects duplicate content hashes shared across datasets", async () => {
+  const rowA = await rowFor({ shared: true });
+  const rowB = { ...await rowFor({ shared: true }), $key: `0x${"02".repeat(32)}` as Hex, datasetId: { value: `0x${"cd".repeat(32)}` as Hex } };
+  await assert.rejects(query([rowA, rowB]), /Duplicate content hash/);
 });
 
 test("rejects invalid encrypted payload hash", async () => {

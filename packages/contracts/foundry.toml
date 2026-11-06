@@ -12,4 +12,4 @@ remappings = ["@openzeppelin/=../../node_modules/@openzeppelin/"]
 whitechain_sepolia = "${WHITECHAIN_RPC_URL}"
 
 [etherscan]
-whitechain_sepolia = { key = "${WHITECHAIN_EXPLORER_API_KEY}", url = "https://explorer.testnet.whitechain.io/api/" }
+whitechain_sepolia = { key = "${WHITECHAIN_EXPLORER_API_KEY}", url = "https://explorer.testnet.whitechain.io/api?" }

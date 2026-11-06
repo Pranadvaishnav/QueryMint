@@ -4,6 +4,8 @@ import { key } from "@arkiv-network/sdk/schema";
 import { type Address, type Hex, keccak256, hexToBytes, toBytes, type PublicClient } from "viem";
 import { decryptPayload, stableJson } from "./encryption.js";
 import { DatasetRecord } from "./schema.js";
+import { withArkivReadRetry } from "./retry.js";
+import { collectArkivPages } from "./pagination.js";
 
 export const settlementReadAbi = [
   {
@@ -85,21 +87,25 @@ export interface QueryArkivRecordsOptions {
   maxRecords: number;
   encryptionKey: Hex;
   pageSize?: number;
+  maxPages?: number;
 }
 
-export async function queryAuthorizedRecords(options: QueryArkivRecordsOptions): Promise<VerifiedRecord[]> {
+export interface QueryRecordScanResult { records: VerifiedRecord[]; totalMatching: number; complete: boolean; pagesScanned: number }
+
+export class DuplicateContentHashError extends Error {
+  readonly code = "DUPLICATE_CONTENT_HASH";
+  constructor(readonly contentHash: Hex, readonly firstDatasetId: Hex, readonly duplicateDatasetId: Hex) {
+    super(`Duplicate content hash ${contentHash} appears in datasets ${firstDatasetId} and ${duplicateDatasetId}`);
+  }
+}
+
+export async function queryAuthorizedRecords(options: QueryArkivRecordsOptions): Promise<QueryRecordScanResult> {
   const { arkivClient, whitechainClient, settlementAddress, coordinator, category, encryptionKey } = options;
   const maxRecords = Math.min(Math.max(options.maxRecords, 1), 1000);
   const pageSize = Math.min(Math.max(options.pageSize ?? 100, 1), 100);
-  const seen = new Set<string>();
   const records: VerifiedRecord[] = [];
-  let cursor: Hex | undefined;
-  let pageCount = 0;
-
-  while (records.length < maxRecords && pageCount < 20) {
-    const predicate = cursor
-      ? and(eq("category", category), gt("$key", key(cursor)))
-      : eq("category", category);
+  const pages = await collectArkivPages(async (cursor) => {
+    const predicate = cursor ? and(eq("category", category), gt("$key", key(cursor))) : eq("category", category);
     const query = arkivClient
       .select({
         $key: true,
@@ -115,25 +121,34 @@ export async function queryAuthorizedRecords(options: QueryArkivRecordsOptions):
       })
       .from(DatasetRecord, { onMismatch: "throw" });
 
-    const page = await query.where(predicate).orderBy(asc("$key")).limit(pageSize).fetch();
-    pageCount++;
-    if (page.entities.length === 0) break;
+    const page = await withArkivReadRetry(() => query.where(predicate).orderBy(asc("$key")).limit(pageSize).fetch());
+    return page.entities as unknown as readonly { $key: Hex; [field: string]: any }[];
+  }, { pageSize, maxPages: options.maxPages ?? 20 });
 
-    const block = await whitechainClient.getBlock({ blockNumber: await whitechainClient.getBlockNumber() });
-    for (const row of page.entities) {
-      cursor = row.$key;
-      const datasetId = row.datasetId.value;
-      const [publisher, policy, grant] = await Promise.all([
-        whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "datasetPublisher", args: [datasetId] }),
-        whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "datasetPolicies", args: [datasetId] }),
-        whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "coordinatorGrants", args: [datasetId, coordinator] }),
-      ]);
-      const [payout, publisherNonce, publisherRegistered] = await whitechainClient.readContract({
-        address: settlementAddress,
-        abi: settlementReadAbi,
-        functionName: "publishers",
-        args: [publisher],
-      });
+  const seenHashes = new Map<string, VerifiedRecord>();
+  const datasetState = new Map<string, Promise<{ publisher: Address; policy: any; grant: any }>>();
+  const publisherState = new Map<string, Promise<readonly [Address, bigint, boolean]>>();
+  const block = await whitechainClient.getBlock({ blockNumber: await whitechainClient.getBlockNumber() });
+  for (const row of pages.entities) {
+      const datasetId = row.datasetId.value as Hex;
+      const datasetKey = datasetId.toLowerCase();
+      let datasetRequest = datasetState.get(datasetKey);
+      if (!datasetRequest) {
+        datasetRequest = Promise.all([
+          whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "datasetPublisher", args: [datasetId] }),
+          whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "datasetPolicies", args: [datasetId] }),
+          whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "coordinatorGrants", args: [datasetId, coordinator] }),
+        ]).then(([publisher, policy, grant]) => ({ publisher, policy, grant }));
+        datasetState.set(datasetKey, datasetRequest);
+      }
+      const { publisher, policy, grant } = await datasetRequest;
+      const publisherKey = publisher.toLowerCase();
+      let publisherRequest = publisherState.get(publisherKey);
+      if (!publisherRequest) {
+        publisherRequest = whitechainClient.readContract({ address: settlementAddress, abi: settlementReadAbi, functionName: "publishers", args: [publisher] }) as Promise<readonly [Address, bigint, boolean]>;
+        publisherState.set(publisherKey, publisherRequest);
+      }
+      const [payout, publisherNonce, publisherRegistered] = await publisherRequest;
       const [pricePerRecord, maxPayoutPerQuery, publisherSignatureThreshold, maxRecordsPerQuery, policyExpiry, policyNonce, policyActive] = policy;
       const [grantExpiry, grantNonce, grantActive] = grant;
       if (
@@ -156,9 +171,9 @@ export async function queryAuthorizedRecords(options: QueryArkivRecordsOptions):
       if (computedContentHash.toLowerCase() !== row.contentHash.value.toLowerCase()) {
         throw new Error(`Content hash mismatch for Arkiv entity ${row.$key}`);
       }
-      if (seen.has(row.contentHash.value.toLowerCase())) continue;
-      seen.add(row.contentHash.value.toLowerCase());
-      records.push({
+      const previous = seenHashes.get(row.contentHash.value.toLowerCase());
+      if (previous) throw new DuplicateContentHashError(row.contentHash.value, previous.datasetId, datasetId);
+      const record: VerifiedRecord = {
         entityKey: row.$key,
         datasetId,
         publisher,
@@ -177,9 +192,10 @@ export async function queryAuthorizedRecords(options: QueryArkivRecordsOptions):
         policyExpiresAt: policyExpiry,
         grantExpiresAt: grantExpiry,
         publisherSignatureThreshold,
-      });
-      if (records.length >= maxRecords) break;
-    }
+      };
+      seenHashes.set(row.contentHash.value.toLowerCase(), record);
+      records.push(record);
   }
-  return records;
+  records.sort((a, b) => BigInt(a.datasetId) < BigInt(b.datasetId) ? -1 : BigInt(a.datasetId) > BigInt(b.datasetId) ? 1 : BigInt(a.contentHash) < BigInt(b.contentHash) ? -1 : BigInt(a.contentHash) > BigInt(b.contentHash) ? 1 : 0);
+  return { records: records.slice(0, maxRecords), totalMatching: records.length, complete: pages.complete, pagesScanned: pages.pagesScanned };
 }

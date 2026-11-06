@@ -31,7 +31,8 @@ function required(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const accessKey = required("ARKIV_ACCESS_KEY");
+  // The SDK supports the public Rabdi endpoint with an empty key (rate limited).
+  const accessKey = process.env.ARKIV_ACCESS_KEY ?? "";
   const encryptionKey = required("DEMO_ENCRYPTION_KEY") as Hex;
   const accountA = privateKeyToAccount(required("PUBLISHER_A_PRIVATE_KEY") as Hex);
   const accountB = privateKeyToAccount(required("PUBLISHER_B_PRIVATE_KEY") as Hex);

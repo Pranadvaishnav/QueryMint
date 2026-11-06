@@ -72,6 +72,7 @@ contract QueryMintSettlementTest {
         _registerPublisher(2);
         _registerPublisher(3);
         _registerPublisher(4);
+        for (uint256 i; i < 5; ++i) _registerDataset(_publisher(i), bytes32(uint256(0x200 + i)));
         token.mint(buyer, 1_000_000_000);
     }
 
@@ -269,7 +270,24 @@ contract QueryMintSettlementTest {
 
     function testGasOnePublisherOneRecord() public { _measureGas(1, 1); }
     function testGasTwoPublishersTwoRecordsEach() public { _measureGas(2, 2); }
+    function testGasFivePublishersTwoRecordsEach() public { _measureGas(5, 2); }
     function testGasFivePublishersTenRecordsEach() public { _measureGas(5, 10); }
+    function testGasTenAllocationsFiftyRecords() public { _measureGas(10, 5); }
+
+    function testSettleMaximumCapacityTenAllocationsFiftyRecords() public {
+        QueryMintSettlement.QueryManifest memory manifest = _buildManifest(10, 5);
+        require(manifest.allocations.length == 10, "allocation count");
+        require(manifest.totalAmount == uint128(PRICE * 50), "total amount");
+        _approve(manifest.totalAmount);
+        uint256 buyerBalance = token.balanceOf(buyer);
+        uint256[5] memory payoutBalances;
+        for (uint256 i; i < 5; ++i) payoutBalances[i] = token.balanceOf(_payout(i));
+        vm.prank(buyer);
+        settlement.settle(manifest);
+        require(token.balanceOf(buyer) == buyerBalance - manifest.totalAmount, "buyer charged exact total");
+        require(settlement.settledQueries(manifest.queryId), "query not marked settled");
+        for (uint256 i; i < 5; ++i) require(token.balanceOf(_payout(i)) == payoutBalances[i] + PRICE * 10, "publisher payout mismatch");
+    }
 
     function _measureGas(uint8 publisherCount, uint8 recordsEach) private {
         QueryMintSettlement.QueryManifest memory manifest = _buildManifest(publisherCount, recordsEach);
@@ -287,16 +305,18 @@ contract QueryMintSettlementTest {
         QueryMintSettlement.Allocation[] memory allocations = new QueryMintSettlement.Allocation[](publisherCount);
         uint256 total;
         for (uint256 i; i < publisherCount; ++i) {
+            uint256 publisherIndex = i % 5;
+            bytes32 datasetId = _datasetId(i);
             bytes32[] memory hashes = new bytes32[](recordsEach);
             for (uint256 j; j < recordsEach; ++j) hashes[j] = bytes32(uint256(10_000 + i * 100 + j));
-            (, uint64 publisherNonce,) = settlement.publishers(_publisher(i));
-            (, , , , , uint64 policyNonce, ) = settlement.datasetPolicies(bytes32(uint256(0x100 + i)));
-            (uint64 grantExpiry, uint64 grantNonce,) = settlement.coordinatorGrants(bytes32(uint256(0x100 + i)), coordinator);
+            (, uint64 publisherNonce,) = settlement.publishers(_publisher(publisherIndex));
+            (, , , , , uint64 policyNonce, ) = settlement.datasetPolicies(datasetId);
+            (uint64 grantExpiry, uint64 grantNonce,) = settlement.coordinatorGrants(datasetId, coordinator);
             require(grantExpiry > block.timestamp, "grant not configured");
             uint128 payout = uint128(uint256(PRICE) * recordsEach);
             allocations[i] = QueryMintSettlement.Allocation({
-                publisher: _publisher(i),
-                datasetId: bytes32(uint256(0x100 + i)),
+                publisher: _publisher(publisherIndex),
+                datasetId: datasetId,
                 publisherNonce: publisherNonce,
                 policyNonce: policyNonce,
                 grantNonce: grantNonce,
@@ -341,10 +361,19 @@ contract QueryMintSettlementTest {
         bytes32 datasetId = bytes32(uint256(0x100 + index));
         vm.prank(publisher);
         settlement.registerPublisher(_payout(index));
+        _registerDataset(publisher, datasetId);
+    }
+
+    function _registerDataset(address publisher, bytes32 datasetId) private {
         vm.prank(publisher);
         settlement.registerDataset(datasetId, PRICE, 50, 100_000_000, 0, uint64(block.timestamp + 3_600));
         vm.prank(publisher);
         settlement.authorizeCoordinator(datasetId, coordinator, uint64(block.timestamp + 1_800));
+    }
+
+    function _datasetId(uint256 allocationIndex) private pure returns (bytes32) {
+        if (allocationIndex < 5) return bytes32(uint256(0x100 + allocationIndex));
+        return bytes32(uint256(0x200 + allocationIndex - 5));
     }
 
     function _publisher(uint256 index) private returns (address) {
