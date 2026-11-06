@@ -54,7 +54,7 @@ function stressRecords(publishers: number, datasetsPerPublisher: number, records
   return records;
 }
 
-function fixture(records: VerifiedRecord[], arkivClient: any = {}, queryManifestRecords?: ((manifest: any) => Promise<any[]>) | null, queryRecordsOverride?: (category: string, limit: number) => Promise<any>, corsOrigins?: string[], trustProxyHops = 0, rateLimitPerMinute = 10_000) {
+function fixture(records: VerifiedRecord[], arkivClient: any = {}, queryManifestRecords?: ((manifest: any) => Promise<any[]>) | null, queryRecordsOverride?: (category: string, limit: number) => Promise<any>, corsOrigins?: string[], trustProxyHops = 0, rateLimitPerMinute = 10_000, failWhitechainAt?: string) {
   const states = new Map(records.map((row) => [row.datasetId.toLowerCase(), row]));
   const uniquePublishers = [...new Set(records.map((row) => row.publisher.toLowerCase()))];
   const publisherPayouts = new Map(uniquePublishers.map((address, index) => [address, `0x${(0xd000 + index).toString(16).padStart(40, "0")}` as Address]));
@@ -63,10 +63,14 @@ function fixture(records: VerifiedRecord[], arkivClient: any = {}, queryManifest
   let receiptStatus: "success" | "reverted" = "success";
   let transactionInput: Hex = "0x";
   let logs: any[] = [];
+  const failWhitechainRead = (stage: string) => {
+    if (failWhitechainAt === stage) throw Object.assign(new Error("upstream failed https://rpc.invalid/secret-access-key plaintext-marker"), { status: 503, code: "UPSTREAM_UNAVAILABLE" });
+  };
   const client = {
-    async getBlockNumber() { return 100n; },
-    async getBlock() { return { timestamp: 1_000n }; },
+    async getBlockNumber() { failWhitechainRead("latest_block"); return 100n; },
+    async getBlock() { failWhitechainRead("latest_block"); return { timestamp: 1_000n }; },
     async readContract(args: any) {
+      failWhitechainRead(args.functionName);
       if (args.functionName === "datasetPublisher") return states.get(args.args[0].toLowerCase())?.publisher ?? `0x${"00".repeat(20)}`;
       if (args.functionName === "datasetPolicies") {
         const row = states.get(args.args[0].toLowerCase())!;
@@ -199,6 +203,46 @@ test("configured trusted Railway X-Real-IP separates rate-limit buckets", async 
   assert.equal(first.status, 200);
   assert.equal(limited.status, 429);
   assert.equal(separate.status, 200);
+});
+
+test("discovery failures log only safe metadata and retain the 503 response", async () => {
+  const records = [makeRecord(0)];
+  const arkivFailure = Object.assign(new Error("failure https://rpc.invalid/secret-access-key plaintext-marker"), { status: 503, code: "UPSTREAM_UNAVAILABLE" });
+  const cases = [
+    { route: "/publishers", stage: "arkiv_entity_query", app: fixture([], failingOrEmptyArkivClient(async () => { throw arkivFailure; })).app },
+    { route: "/publishers", stage: "whitechain_publisher_registration_read", app: fixture(records, arkivDiscoveryClient(records), undefined, undefined, undefined, 0, 10_000, "publishers").app },
+    { route: "/datasets", stage: "arkiv_entity_query", app: fixture([], failingOrEmptyArkivClient(async () => { throw arkivFailure; })).app },
+    { route: "/datasets", stage: "whitechain_latest_block_read", app: fixture(records, arkivDiscoveryClient(records), undefined, undefined, undefined, 0, 10_000, "latest_block").app },
+    { route: "/datasets", stage: "whitechain_dataset_owner_read", app: fixture(records, arkivDiscoveryClient(records), undefined, undefined, undefined, 0, 10_000, "datasetPublisher").app },
+    { route: "/datasets", stage: "whitechain_dataset_policy_read", app: fixture(records, arkivDiscoveryClient(records), undefined, undefined, undefined, 0, 10_000, "datasetPolicies").app },
+    { route: "/datasets", stage: "whitechain_coordinator_grant_read", app: fixture(records, arkivDiscoveryClient(records), undefined, undefined, undefined, 0, 10_000, "coordinatorGrants").app },
+  ];
+
+  for (const [index, scenario] of cases.entries()) {
+    const logs: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { logs.push(String(args[0])); };
+    let response: Response | undefined;
+    try {
+      response = await requestApp(scenario.app, scenario.route, { headers: { "x-railway-request-id": `railway-${index + 1}` } });
+    } finally { console.error = originalError; }
+    assert(response);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: `${scenario.route === "/publishers" ? "Publisher" : "Dataset"} discovery is temporarily unavailable. Retry shortly.`, code: "DISCOVERY_UNAVAILABLE", retryable: true });
+    assert.equal(logs.length, 1);
+    const logLine = logs[0] ?? "";
+    const entry = JSON.parse(logLine);
+    assert.equal(entry.event, "discovery_failed");
+    assert.equal(entry.requestId, `railway-${index + 1}`);
+    assert.equal(entry.route, scenario.route === "/publishers" ? "GET /publishers" : "GET /datasets");
+    assert.equal(entry.stage, scenario.stage);
+    assert.equal(entry.errorName, "Error");
+    assert.equal(entry.status, 503);
+    assert.equal(entry.code, "UPSTREAM_UNAVAILABLE");
+    assert.equal(logLine.includes("secret-access-key"), false);
+    assert.equal(logLine.includes("plaintext-marker"), false);
+    assert.equal(logLine.includes("rpc.invalid"), false);
+  }
 });
 
 test("publisher discovery retries a transient Arkiv 429 before returning an empty result", async () => {

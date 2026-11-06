@@ -46,6 +46,41 @@ class IncompleteArkivScanError extends Error {
   }
 }
 
+type DiscoveryStage = "arkiv_entity_query" | "whitechain_latest_block_read" | "whitechain_publisher_registration_read" |
+  "whitechain_dataset_owner_read" | "whitechain_dataset_policy_read" | "whitechain_coordinator_grant_read";
+
+class DiscoveryStageError extends Error {
+  constructor(readonly stage: DiscoveryStage, readonly original: unknown) {
+    super("Discovery dependency failed");
+  }
+}
+
+async function withDiscoveryStage<T>(stage: DiscoveryStage, operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new DiscoveryStageError(stage, error); }
+}
+
+function safeDiscoveryErrorMetadata(error: unknown) {
+  const source = error instanceof DiscoveryStageError ? error.original : error;
+  const errorName = source instanceof Error ? source.name : "UnknownError";
+  const name = /^[A-Za-z0-9_$.-]{1,64}$/.test(errorName) ? errorName : "Error";
+  const metadata: { errorName: string; status?: number; code?: string } = { errorName: name };
+  let current = source;
+  for (let depth = 0; current && typeof current === "object" && depth < 5; depth++) {
+    const record = current as { status?: unknown; statusCode?: unknown; code?: unknown; cause?: unknown };
+    const status = typeof record.status === "number" ? record.status : record.statusCode;
+    if (metadata.status === undefined && typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) metadata.status = status;
+    if (metadata.code === undefined && typeof record.code === "string" && /^[A-Z0-9_]{1,32}$/.test(record.code)) metadata.code = record.code;
+    current = record.cause;
+  }
+  return metadata;
+}
+
+function safeRequestId(req: Request): string {
+  const value = req.get("x-railway-request-id");
+  return value && /^[A-Za-z0-9._-]{1,128}$/.test(value) ? value : "unknown";
+}
+
 class DeliveryVerificationError extends Error {}
 
 const querySettledEvent = parseAbiItem(
@@ -237,20 +272,21 @@ export function createCoordinatorApp(deps: CoordinatorDependencies): Express {
 
   function loadPublishers(): Promise<unknown[]> {
     return coalesceDiscovery("publishers", async () => {
-      const paged = await collectArkivPages(async (cursor) => {
+      const paged = await withDiscoveryStage("arkiv_entity_query", () => collectArkivPages(async (cursor) => {
         const predicate = cursor ? and(eq("status", "active"), gt("$key", key(cursor))) : eq("status", "active");
         const query = deps.arkivClient.select({ $key: true, $owner: true, wallet: true, status: true, displayName: true, payoutAddress: true })
           .from(PublisherProfile, { onMismatch: "throw" });
         const page = await withArkivReadRetry(() => query.where(predicate).orderBy(asc("$key")).limit(DISCOVERY_PAGE_SIZE).fetch());
         return (page as { entities: Array<{ $key: Hex; [field: string]: any }> }).entities;
-      }, { pageSize: DISCOVERY_PAGE_SIZE, maxPages: DISCOVERY_MAX_PAGES });
-      if (!paged.complete) throw new IncompleteArkivScanError(paged.entities.length, paged.pagesScanned, "publisher discovery");
+      }, { pageSize: DISCOVERY_PAGE_SIZE, maxPages: DISCOVERY_MAX_PAGES }));
+      if (!paged.complete) throw new DiscoveryStageError("arkiv_entity_query", new IncompleteArkivScanError(paged.entities.length, paged.pagesScanned, "publisher discovery"));
       const results = [];
       const seenPublishers = new Set<string>();
       for (const row of paged.entities) {
         const owner = row.wallet.value as Address;
         if (row.$owner.toLowerCase() !== owner.toLowerCase() || row.status.value !== "active" || seenPublishers.has(owner.toLowerCase())) continue;
-        const [payout, , registered] = await deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "publishers", args: [owner] });
+        const [payout, , registered] = await withDiscoveryStage("whitechain_publisher_registration_read", () =>
+          deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "publishers", args: [owner] }));
         if (!registered) continue;
         seenPublishers.add(owner.toLowerCase());
         results.push({ address: owner, displayName: row.displayName.value, payoutAddress: payout, entityKey: row.$key });
@@ -262,16 +298,17 @@ export function createCoordinatorApp(deps: CoordinatorDependencies): Express {
     const flightKey = `datasets:${datasetId?.toLowerCase() ?? "all"}`;
     return coalesceDiscovery(flightKey, async () => {
       const predicate = datasetId ? and(eq("status", "active"), eq("datasetId", key(datasetId))) : eq("status", "active");
-      const paged = await collectArkivPages(async (cursor) => {
+      const paged = await withDiscoveryStage("arkiv_entity_query", () => collectArkivPages(async (cursor) => {
         const pagePredicate = cursor ? and(predicate, gt("$key", key(cursor))) : predicate;
         const query = deps.arkivClient.select({ $key: true, $owner: true, datasetId: true, publisher: true, category: true, status: true, title: true, description: true })
           .from(DatasetManifest, { onMismatch: "throw" });
         const page = await withArkivReadRetry(() => query.where(pagePredicate).orderBy(asc("$key")).limit(DISCOVERY_PAGE_SIZE).fetch());
         return (page as { entities: Array<{ $key: Hex; [field: string]: any }> }).entities;
-      }, { pageSize: DISCOVERY_PAGE_SIZE, maxPages: DISCOVERY_MAX_PAGES });
-      if (!paged.complete) throw new IncompleteArkivScanError(paged.entities.length, paged.pagesScanned, "dataset discovery");
+      }, { pageSize: DISCOVERY_PAGE_SIZE, maxPages: DISCOVERY_MAX_PAGES }));
+      if (!paged.complete) throw new DiscoveryStageError("arkiv_entity_query", new IncompleteArkivScanError(paged.entities.length, paged.pagesScanned, "dataset discovery"));
       if (!paged.entities.length) return [];
-      const block = await deps.whitechainClient.getBlock({ blockNumber: await deps.whitechainClient.getBlockNumber() });
+      const block = await withDiscoveryStage("whitechain_latest_block_read", async () =>
+        deps.whitechainClient.getBlock({ blockNumber: await deps.whitechainClient.getBlockNumber() }));
       const results = [];
       const seenDatasets = new Set<string>();
       for (const row of paged.entities) {
@@ -279,9 +316,9 @@ export function createCoordinatorApp(deps: CoordinatorDependencies): Express {
         const publisher = row.publisher.value as Address;
         if (row.$owner.toLowerCase() !== publisher.toLowerCase() || row.status.value !== "active" || seenDatasets.has(id.toLowerCase())) continue;
         const [onChainPublisher, policy, grant] = await Promise.all([
-          deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "datasetPublisher", args: [id] }),
-          deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "datasetPolicies", args: [id] }),
-          deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "coordinatorGrants", args: [id, deps.coordinatorAccount.address] }),
+          withDiscoveryStage("whitechain_dataset_owner_read", () => deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "datasetPublisher", args: [id] })),
+          withDiscoveryStage("whitechain_dataset_policy_read", () => deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "datasetPolicies", args: [id] })),
+          withDiscoveryStage("whitechain_coordinator_grant_read", () => deps.whitechainClient.readContract({ address: deps.settlementAddress, abi: settlementApiAbi, functionName: "coordinatorGrants", args: [id, deps.coordinatorAccount.address] })),
         ]);
         if (onChainPublisher.toLowerCase() !== publisher.toLowerCase() || !policy[6] || !grant[2] || block.timestamp >= policy[4] || block.timestamp >= grant[0]) continue;
         seenDatasets.add(id.toLowerCase());
@@ -293,16 +330,20 @@ export function createCoordinatorApp(deps: CoordinatorDependencies): Express {
     });
   }
 
-  const discoveryFailure = (res: Response, resource: string, error?: unknown) => {
-    if (error instanceof IncompleteArkivScanError) return res.status(503).json({ error: error.message, code: error.code, retryable: true });
+  const discoveryFailure = (req: Request, res: Response, route: string, resource: string, error: unknown) => {
+    const stageError = error instanceof DiscoveryStageError ? error : undefined;
+    const original = stageError?.original ?? error;
+    console.error(JSON.stringify({ event: "discovery_failed", requestId: safeRequestId(req), route,
+      stage: stageError?.stage ?? "discovery_processing", ...safeDiscoveryErrorMetadata(error) }));
+    if (original instanceof IncompleteArkivScanError) return res.status(503).json({ error: original.message, code: original.code, retryable: true });
     return res.status(503).json({ error: `${resource} discovery is temporarily unavailable. Retry shortly.`, code: "DISCOVERY_UNAVAILABLE", retryable: true });
   };
-  app.get("/publishers", async (_req, res) => { try { res.json({ publishers: await loadPublishers() }); } catch (error) { discoveryFailure(res, "Publisher", error); } });
-  app.get("/datasets", async (_req, res) => { try { res.json({ datasets: await loadDatasets() }); } catch (error) { discoveryFailure(res, "Dataset", error); } });
+  app.get("/publishers", async (req, res) => { try { res.json({ publishers: await loadPublishers() }); } catch (error) { discoveryFailure(req, res, "GET /publishers", "Publisher", error); } });
+  app.get("/datasets", async (req, res) => { try { res.json({ datasets: await loadDatasets() }); } catch (error) { discoveryFailure(req, res, "GET /datasets", "Dataset", error); } });
   app.get("/datasets/:datasetId", async (req, res) => {
     if (!isBytes32(req.params.datasetId)) return badRequest(res, "datasetId must be bytes32");
     try { const items = await loadDatasets(req.params.datasetId as Hex); res.status(items.length ? 200 : 404).json(items[0] ?? { error: "Dataset not found or inactive" }); }
-    catch (error) { discoveryFailure(res, "Dataset", error); }
+    catch (error) { discoveryFailure(req, res, "GET /datasets/:datasetId", "Dataset", error); }
   });
 
   app.post("/query/quote", async (req, res) => {
