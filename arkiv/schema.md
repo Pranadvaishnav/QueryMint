@@ -1,4 +1,4 @@
-# QueryMint Arkiv schema (draft)
+# QueryMint Arkiv schema
 
 All entities are public. Dataset owners publish their own profiles, manifests, and records. The coordinator owns query receipts it writes. Expiry should follow the dataset retention policy; start with the shortest practical lifetime and extend still-active records.
 
@@ -13,4 +13,4 @@ The installed SDK version `@arkiv-network/sdk@1.0.1` does not expose a `bytes32(
 
 The contract is authoritative for dataset ownership, pricing, coordinator grants, expiry, and payout limits. Arkiv manifest terms are discovery metadata only. Coordinator query results must be owner-checked against current Whitechain registration. No plaintext licensed payload or decryption key belongs on Arkiv.
 
-The implementation is pinned to `@arkiv-network/sdk@1.0.1`. The writer and query script use the installed schema constructors and query API. Pagination uses an indexed keyset predicate (`$key > lastKey`) with ascending `$key` ordering and a page limit (maximum 100), not an assumed offset method. The writer script is reproducible, but a real Rabdi write/query has not yet been run because no Arkiv access key and publisher wallets were supplied.
+The implementation is pinned to `@arkiv-network/sdk@1.0.1`. The writer and query implementation use the installed schema constructors and query API. Pagination uses an indexed keyset predicate (`$key > lastKey`) with ascending `$key` ordering and a page limit (maximum 100), not an assumed offset method. The project owner reports successful Rabdi publishing for two publishers and four records. The production coordinator's read-only discovery/quote smoke check on 2026-11-07 returned two active datasets and four matching records. This is not a fresh direct Arkiv transaction submission.

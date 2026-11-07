@@ -13,3 +13,4 @@ packages/contracts/lib/
 packages/contracts/.gas-snapshot
 *.log
 *.tsbuildinfo
+*.tgz

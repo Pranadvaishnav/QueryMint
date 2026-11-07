@@ -3,7 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "vite --host localhost", "build": "tsc -b && vite build", "preview": "vite preview --host localhost", "typecheck": "tsc --noEmit -p tsconfig.json", "test": "tsx --test src/reliability.test.ts src/payment.test.ts" },
+  "scripts": {
+    "dev": "npm run build --workspace @querymint/sdk && vite --host localhost",
+    "build": "npm run build --workspace @querymint/sdk && tsc -b && vite build",
+    "preview": "vite preview --host localhost",
+    "typecheck": "npm run build --workspace @querymint/sdk && tsc --noEmit -p tsconfig.json",
+    "test": "npm run build --workspace @querymint/sdk && tsx --test src/reliability.test.ts src/payment.test.ts"
+  },
   "dependencies": {
     "@arkiv-network/sdk": "1.0.1",
     "@querymint/sdk": "0.1.0",

@@ -1,6 +1,6 @@
 # QueryMint coordinator API
 
-The coordinator listens on `127.0.0.1:${COORDINATOR_PORT}` by default. It requires server-side Arkiv, Whitechain, encryption, and coordinator-signing configuration; none of these secrets belong in the browser. Set `COORDINATOR_CORS_ORIGIN` to the exact web origin.
+The coordinator listens on `127.0.0.1:${COORDINATOR_PORT}` by default for local development and binds `0.0.0.0:$PORT` in production. Production is currently reported at `https://querymint-production.up.railway.app`; a read-only check on 2026-11-07 observed `/health`, `/publishers`, `/datasets`, and signed quote generation succeeding. This is a point-in-time observation, not an uptime guarantee. The coordinator requires server-side Arkiv, Whitechain, encryption, and coordinator-signing configuration; none of these secrets belong in the browser. Set `COORDINATOR_CORS_ORIGINS` to exact web origins.
 
 For local startup, copy `.env.example` to `.env`, fill in the coordinator key, Arkiv access key, 32-byte demo encryption key, Whitechain RPC, and deployed settlement address, then run `npm run dev:coordinator` from the repository root. The `/health` route confirms the process is serving; network readiness is established by actual route calls. Without a settlement deployment address and Arkiv key, the app can be exercised through the injected mocked clients in the test suite, but not against the real networks.
 

@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --env-file=../../.env --import tsx src/index.ts",
-    "start": "node --import tsx src/index.ts",
-    "build": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test test/api.test.ts test/query.test.ts test/arkiv-retry.test.ts test/pagination.test.ts",
+    "dev": "npm run build --workspace @querymint/shared && node --watch --env-file=../../.env --import tsx src/index.ts",
+    "start": "npm run build --workspace @querymint/shared && node --import tsx src/index.ts",
+    "build": "npm run build --workspace @querymint/shared && tsc --noEmit -p tsconfig.json",
+    "test": "npm run build --workspace @querymint/shared && tsx --test test/api.test.ts test/query.test.ts test/arkiv-retry.test.ts test/pagination.test.ts",
     "arkiv:roundtrip": "node --env-file=../../.env --import tsx scripts/arkiv-roundtrip.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "npm run build --workspace @querymint/shared && tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@arkiv-network/sdk": "1.0.1",

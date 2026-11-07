@@ -2,6 +2,8 @@
 
 This guide prepares the existing web applications for Vercel and the coordinator for Railway. It does not deploy services or change the deployed Whitechain contract. The settlement network remains Whitechain Sepolia (chain 1874); Arkiv Rabdi (chain 7794095) remains the publisher-data store.
 
+Current production endpoints reported/observed: coordinator `https://querymint-production.up.railway.app`, marketplace `https://web-rczjtwpqc-pranad.vercel.app`. The marketplace origin's CORS preflight and coordinator discovery were observed working on 2026-11-07. Hosting control panels and the SDK demo's production URL were not available for this verification. Re-check these before public demo day; do not infer Railway secret values from a successful API response.
+
 ## Deployable workspaces
 
 | Workspace | Purpose | Build | Production start / output |
@@ -69,7 +71,7 @@ Values are intentionally omitted. Create secrets directly in the Railway variabl
 
 | Variable | Web | Demo | Secret? | Required / notes |
 |---|---:|---:|---:|---|
-| `VITE_COORDINATOR_API_URL` | Yes | Yes | No | Public Railway HTTPS base URL; set in both projects. |
+| `VITE_COORDINATOR_API_URL` | Yes | Yes | No | Public Railway HTTPS base URL (`https://querymint-production.up.railway.app`); set in both Vercel projects. The SDK demo disables quote actions when this value is absent. |
 | `VITE_QUERYMINT_SETTLEMENT_ADDRESS` | Yes | Yes | No | Public address of the already deployed contract. |
 | `VITE_WHITECHAIN_RPC_URL` | Yes | Yes | No* | Public Whitechain Sepolia RPC used by browser wallet/client reads. If provider URL contains a credential, treat it as public and use a restricted key. |
 | `VITE_COORDINATOR_ADDRESS` | Yes | No | No | Public signer address used by publisher authorization flows. |

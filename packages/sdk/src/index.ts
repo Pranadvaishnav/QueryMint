@@ -2,11 +2,14 @@ import {
   type Address,
   type Hex,
   type PublicClient,
+  type TransactionReceipt,
   type WalletClient,
   decodeEventLog,
+  isAddress,
   parseAbiItem,
+  recoverAddress,
 } from "viem";
-import { WHITECHAIN_USDT, type QueryManifest } from "@querymint/shared";
+import { WHITECHAIN_USDT, hashQueryManifest, hashResultRoot, type QueryManifest } from "@querymint/shared";
 
 export * from "@querymint/shared";
 
@@ -20,6 +23,14 @@ export interface QueryMintQuote {
   breakdown: Array<{ publisher: Address; datasetId: Hex; recordCount: number; pricePerRecord: string; payoutAmount: string }>;
   publisherApprovalRequests?: Array<{ publisher: Address; datasetId: Hex; domain: unknown; types: unknown; primaryType: string; message: Record<string, unknown> }>;
   approvalsMissing?: Hex[];
+}
+
+export interface QueryMintDelivery {
+  transactionHash: Hex;
+  receipt: TransactionReceipt;
+  queryId: Hex;
+  blockNumber: string;
+  records: Array<{ publisher: Address; datasetId: Hex; recordHash: Hex; payload: unknown }>;
 }
 
 export interface CreateQueryMintOptions {
@@ -73,19 +84,138 @@ const deliveryAuthorizationTypes = { DeliveryAuthorization: [
   { name: "queryId", type: "bytes32" }, { name: "transactionHash", type: "bytes32" }, { name: "buyer", type: "address" },
 ] } as const;
 
+type JsonObject = Record<string, unknown>;
+const objectValue = (value: unknown, field: string): JsonObject => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid QueryMint response: ${field} must be an object`);
+  return value as JsonObject;
+};
+const addressValue = (value: unknown, field: string): Address => {
+  if (typeof value !== "string" || !isAddress(value, { strict: false })) throw new Error(`Invalid QueryMint response: ${field} must be an address`);
+  return value as Address;
+};
+const bytes32Value = (value: unknown, field: string): Hex => {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) throw new Error(`Invalid QueryMint response: ${field} must be bytes32`);
+  return value as Hex;
+};
+const bytesValue = (value: unknown, field: string, bytes?: number): Hex => {
+  if (typeof value !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(value) || (bytes !== undefined && value.length !== 2 + bytes * 2)) {
+    throw new Error(`Invalid QueryMint response: ${field} must be valid hex${bytes === undefined ? "" : ` (${bytes} bytes)`}`);
+  }
+  return value as Hex;
+};
+const uintValue = (value: unknown, field: string, bits: number): bigint => {
+  if ((typeof value !== "string" && typeof value !== "bigint") || !/^\d+$/.test(String(value))) throw new Error(`Invalid QueryMint response: ${field} must be an unsigned integer`);
+  const number = BigInt(value);
+  if (number >= (1n << BigInt(bits))) throw new Error(`Invalid QueryMint response: ${field} exceeds uint${bits}`);
+  return number;
+};
+const countValue = (value: unknown, field: string, maximum: number): number => {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > maximum) throw new Error(`Invalid QueryMint response: ${field} must be an integer from 0 to ${maximum}`);
+  return value;
+};
+
+async function normalizeQuote(value: unknown, expectedBuyer?: Address, expectedSettlement?: Address): Promise<QueryMintQuote> {
+  const raw = objectValue(value, "quote");
+  const quoteId = bytes32Value(raw.quoteId, "quoteId");
+  const manifestRaw = objectValue(raw.manifest, "manifest");
+  const queryId = bytes32Value(manifestRaw.queryId, "manifest.queryId");
+  const buyer = addressValue(manifestRaw.buyer, "manifest.buyer");
+  const coordinator = addressValue(manifestRaw.coordinator, "manifest.coordinator");
+  const token = addressValue(manifestRaw.token, "manifest.token");
+  const settlementAddress = addressValue(raw.settlementAddress, "settlementAddress");
+  if (token.toLowerCase() !== WHITECHAIN_USDT.toLowerCase()) throw new Error("Invalid QueryMint response: manifest token is not official Whitechain Sepolia USDT");
+  if (quoteId.toLowerCase() !== queryId.toLowerCase()) throw new Error("Invalid QueryMint response: quoteId does not match manifest queryId");
+  if (expectedBuyer && buyer.toLowerCase() !== expectedBuyer.toLowerCase()) throw new Error("Invalid QueryMint response: buyer does not match the connected wallet");
+  if (expectedSettlement && settlementAddress.toLowerCase() !== expectedSettlement.toLowerCase()) throw new Error("Invalid QueryMint response: settlement address does not match SDK configuration");
+
+  const totalAmount = uintValue(manifestRaw.totalAmount, "manifest.totalAmount", 128);
+  const deadline = uintValue(manifestRaw.deadline, "manifest.deadline", 64);
+  const resultRoot = bytes32Value(manifestRaw.resultRoot, "manifest.resultRoot");
+  const coordinatorSignature = bytesValue(manifestRaw.coordinatorSignature, "manifest.coordinatorSignature", 65);
+  if (!Array.isArray(manifestRaw.allocations) || manifestRaw.allocations.length < 1 || manifestRaw.allocations.length > 10) throw new Error("Invalid QueryMint response: manifest allocations must contain 1 to 10 entries");
+  const seenDatasets = new Set<string>();
+  const seenHashes = new Set<string>();
+  let allocatedAmount = 0n;
+  let allocatedRecords = 0;
+  const allocations = manifestRaw.allocations.map((value, index) => {
+    const rawAllocation = objectValue(value, `manifest.allocations[${index}]`);
+    const publisher = addressValue(rawAllocation.publisher, `manifest.allocations[${index}].publisher`);
+    const datasetId = bytes32Value(rawAllocation.datasetId, `manifest.allocations[${index}].datasetId`);
+    const key = datasetId.toLowerCase();
+    if (seenDatasets.has(key)) throw new Error("Invalid QueryMint response: duplicate dataset allocation");
+    seenDatasets.add(key);
+    const publisherNonce = uintValue(rawAllocation.publisherNonce, `manifest.allocations[${index}].publisherNonce`, 64);
+    const policyNonce = uintValue(rawAllocation.policyNonce, `manifest.allocations[${index}].policyNonce`, 64);
+    const grantNonce = uintValue(rawAllocation.grantNonce, `manifest.allocations[${index}].grantNonce`, 64);
+    const payoutAmount = uintValue(rawAllocation.payoutAmount, `manifest.allocations[${index}].payoutAmount`, 128);
+    const recordCount = countValue(rawAllocation.recordCount, `manifest.allocations[${index}].recordCount`, 50);
+    if (!recordCount || !Array.isArray(rawAllocation.recordHashes) || rawAllocation.recordHashes.length !== recordCount) throw new Error("Invalid QueryMint response: allocation record count does not match record hashes");
+    const recordHashes = rawAllocation.recordHashes.map((hash, hashIndex) => {
+      const recordHash = bytes32Value(hash, `manifest.allocations[${index}].recordHashes[${hashIndex}]`);
+      const hashKey = recordHash.toLowerCase();
+      if (seenHashes.has(hashKey)) throw new Error("Invalid QueryMint response: duplicate record hash");
+      seenHashes.add(hashKey);
+      return recordHash;
+    });
+    allocatedAmount += payoutAmount;
+    allocatedRecords += recordCount;
+    if (allocatedRecords > 50) throw new Error("Invalid QueryMint response: quote exceeds 50 records");
+    return { publisher, datasetId, publisherNonce, policyNonce, grantNonce, recordCount, recordHashes,
+      payoutAmount, publisherSignature: bytesValue(rawAllocation.publisherSignature, `manifest.allocations[${index}].publisherSignature`) };
+  });
+  if (allocatedAmount !== totalAmount) throw new Error("Invalid QueryMint response: allocation payouts do not sum to manifest total");
+
+  if (!Array.isArray(raw.records) || raw.records.length !== allocatedRecords) throw new Error("Invalid QueryMint response: record previews do not match manifest record count");
+  const expectedRecords = new Set(allocations.flatMap((allocation) => allocation.recordHashes.map((hash) => `${allocation.publisher.toLowerCase()}:${allocation.datasetId.toLowerCase()}:${hash.toLowerCase()}`)));
+  for (const [index, value] of raw.records.entries()) {
+    const record = objectValue(value, `records[${index}]`);
+    if (Object.hasOwn(record, "payload") || Object.hasOwn(record, "encryptedPayload")) throw new Error("Invalid QueryMint response: quote previews must not contain payload data");
+    const identity = `${addressValue(record.publisher, `records[${index}].publisher`).toLowerCase()}:${bytes32Value(record.datasetId, `records[${index}].datasetId`).toLowerCase()}:${bytes32Value(record.recordHash, `records[${index}].recordHash`).toLowerCase()}`;
+    if (!expectedRecords.delete(identity) || typeof record.preview !== "string") throw new Error("Invalid QueryMint response: record preview does not match signed manifest");
+  }
+  if (expectedRecords.size) throw new Error("Invalid QueryMint response: a manifest record preview is missing");
+
+  if (!Array.isArray(raw.breakdown) || raw.breakdown.length !== allocations.length) throw new Error("Invalid QueryMint response: payout breakdown does not match allocations");
+  const seenBreakdown = new Set<string>();
+  const breakdown = raw.breakdown.map((value, index) => {
+    const row = objectValue(value, `breakdown[${index}]`);
+    const publisher = addressValue(row.publisher, `breakdown[${index}].publisher`);
+    const datasetId = bytes32Value(row.datasetId, `breakdown[${index}].datasetId`);
+    const recordCount = countValue(row.recordCount, `breakdown[${index}].recordCount`, 50);
+    const pricePerRecord = uintValue(row.pricePerRecord, `breakdown[${index}].pricePerRecord`, 128);
+    const payoutAmount = uintValue(row.payoutAmount, `breakdown[${index}].payoutAmount`, 128);
+    if (seenBreakdown.has(datasetId.toLowerCase())) throw new Error("Invalid QueryMint response: duplicate payout breakdown entry");
+    seenBreakdown.add(datasetId.toLowerCase());
+    const allocation = allocations.find((candidate) => candidate.datasetId.toLowerCase() === datasetId.toLowerCase());
+    if (!allocation || allocation.publisher.toLowerCase() !== publisher.toLowerCase() || allocation.recordCount !== recordCount || allocation.payoutAmount !== payoutAmount || pricePerRecord * BigInt(recordCount) !== payoutAmount) {
+      throw new Error("Invalid QueryMint response: payout breakdown differs from signed allocation");
+    }
+    return { publisher, datasetId, recordCount, pricePerRecord: pricePerRecord.toString(), payoutAmount: payoutAmount.toString() };
+  });
+  const totalMatchingRecords = countValue(raw.totalMatchingRecords, "totalMatchingRecords", Number.MAX_SAFE_INTEGER);
+  const eligibleRecords = countValue(raw.eligibleRecords, "eligibleRecords", 50);
+  if (eligibleRecords !== allocatedRecords || totalMatchingRecords < eligibleRecords || raw.searchComplete !== true) throw new Error("Invalid QueryMint response: discovery counts or completeness are inconsistent");
+
+  const publisherApprovalRequests = raw.publisherApprovalRequests;
+  if (!Array.isArray(publisherApprovalRequests)) throw new Error("Invalid QueryMint response: publisherApprovalRequests must be an array");
+  const approvalsMissing = raw.approvalsMissing;
+  if (approvalsMissing !== undefined && (!Array.isArray(approvalsMissing) || approvalsMissing.some((item) => typeof item !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(item)))) {
+    throw new Error("Invalid QueryMint response: approvalsMissing must contain dataset IDs");
+  }
+  const manifest: QueryManifest = { queryId, buyer, coordinator, token, totalAmount, deadline, resultRoot, allocations, coordinatorSignature };
+  if (hashResultRoot(allocations).toLowerCase() !== resultRoot.toLowerCase()) throw new Error("Invalid QueryMint response: result root does not match allocation record hashes");
+  let signer: Address;
+  try { signer = await recoverAddress({ hash: hashQueryManifest({ name: "QueryMint", version: "1", chainId: 1874, verifyingContract: settlementAddress }, manifest), signature: coordinatorSignature }); }
+  catch { throw new Error("Invalid QueryMint response: coordinator signature is malformed"); }
+  if (signer.toLowerCase() !== coordinator.toLowerCase()) throw new Error("Invalid QueryMint response: coordinator signature does not match manifest");
+  return { ...raw, quoteId, settlementAddress, manifest, records: raw.records as QueryMintQuote["records"], totalMatchingRecords,
+    eligibleRecords, breakdown, publisherApprovalRequests: publisherApprovalRequests as QueryMintQuote["publisherApprovalRequests"],
+    ...(approvalsMissing === undefined ? {} : { approvalsMissing: approvalsMissing as Hex[] }) } as QueryMintQuote;
+}
+
 export function createQueryMint(options: CreateQueryMintOptions) {
   const request = options.fetch ?? fetch;
   const apiUrl = options.apiUrl.replace(/\/$/, "");
-  const reviveQuote = (quote: any): QueryMintQuote => {
-    quote.manifest.totalAmount = BigInt(quote.manifest.totalAmount);
-    quote.manifest.deadline = BigInt(quote.manifest.deadline);
-    quote.manifest.allocations = quote.manifest.allocations.map((allocation: any) => ({
-      ...allocation,
-      publisherNonce: BigInt(allocation.publisherNonce), policyNonce: BigInt(allocation.policyNonce),
-      grantNonce: BigInt(allocation.grantNonce), payoutAmount: BigInt(allocation.payoutAmount),
-    }));
-    return quote as QueryMintQuote;
-  };
   return {
     async quote(input: { where: { category: string }; limit?: number }): Promise<QueryMintQuote> {
       const buyer = options.walletClient.account?.address;
@@ -99,7 +229,7 @@ export function createQueryMint(options: CreateQueryMintOptions) {
         catch { /* Keep the status-only fallback for non-JSON responses. */ }
         throw new Error(detail);
       }
-      return reviveQuote(await response.json());
+      return await normalizeQuote(await response.json(), buyer, options.settlementAddress);
     },
     async submitPublisherApproval(input: { quoteId: Hex; datasetId: Hex; signature: Hex }) {
       const response = await request(`${apiUrl}/query/${input.quoteId}/publisher-approval`, {
@@ -111,14 +241,27 @@ export function createQueryMint(options: CreateQueryMintOptions) {
     async refreshQuote(input: { quote: QueryMintQuote }): Promise<QueryMintQuote> {
       const response = await request(`${apiUrl}/query/${input.quote.quoteId}/quote`);
       if (!response.ok) throw new Error(`Unable to refresh quote (${response.status}): ${await response.text()}`);
-      const latest = await response.json() as any;
-      return reviveQuote({ ...input.quote, manifest: latest.manifest, approvalsMissing: latest.approvalsMissing,
-        publisherApprovalRequests: (input.quote.publisherApprovalRequests ?? []).filter((request) => latest.approvalsMissing?.includes(request.datasetId.toLowerCase())) });
+      const latest = objectValue(await response.json(), "refreshed quote");
+      if (typeof latest.quoteId !== "string" || latest.quoteId.toLowerCase() !== input.quote.quoteId.toLowerCase()) throw new Error("Invalid QueryMint response: refreshed quote ID changed");
+      if (!latest.manifest) throw new Error("Invalid QueryMint response: refreshed manifest is missing");
+      const approvalsMissing = latest.approvalsMissing;
+      const refreshed = await normalizeQuote({ ...input.quote, manifest: latest.manifest,
+        ...(approvalsMissing === undefined ? {} : { approvalsMissing }) }, input.quote.manifest.buyer, options.settlementAddress);
+      if (refreshed.manifest.coordinator.toLowerCase() !== input.quote.manifest.coordinator.toLowerCase() ||
+        refreshed.manifest.token.toLowerCase() !== input.quote.manifest.token.toLowerCase()) {
+        throw new Error("Invalid QueryMint response: refreshed quote changed coordinator or token");
+      }
+      return { ...refreshed, publisherApprovalRequests: (input.quote.publisherApprovalRequests ?? []).filter((approval) =>
+        refreshed.approvalsMissing?.some((datasetId) => datasetId.toLowerCase() === approval.datasetId.toLowerCase())) };
     },
     async deliver(input: { transactionHash: Hex }) {
       const account = options.walletClient.account;
       if (!account) { options.onDeliveryStep?.({ status: "unrecoverable error", message: "Connect the buyer wallet before recovering delivery." }); throw new Error("walletClient must have an account"); }
       options.onDeliveryStep?.({ status: "pending", message: "Verifying the settlement receipt before delivery." });
+      if (await options.walletClient.getChainId() !== 1874 || await options.publicClient.getChainId() !== 1874) {
+        options.onDeliveryStep?.({ status: "unrecoverable error", message: "Switch both wallet and public client to Whitechain Sepolia before delivery recovery." });
+        throw new Error("Delivery requires Whitechain Sepolia clients");
+      }
       let receipt;
       try { receipt = await options.publicClient.getTransactionReceipt({ hash: input.transactionHash }); }
       catch (error) { options.onDeliveryStep?.({ status: "retryable error", message: "Could not retrieve the transaction receipt. Check the network and retry." }); throw error; }
@@ -146,7 +289,23 @@ export function createQueryMint(options: CreateQueryMintOptions) {
         options.onDeliveryStep?.({ status: retryable ? "retryable error" : "unrecoverable error", message: retryable ? `Coordinator delivery is temporarily unavailable (${response.status}). Retry.` : `Coordinator rejected delivery (${response.status}). Check the buyer wallet and settlement hash.` });
         throw new Error(`Settlement succeeded but data delivery failed (${response.status})`);
       }
-      const result = { transactionHash: input.transactionHash, receipt, ...(await response.json() as { records: unknown[]; blockNumber: string; queryId: Hex }) };
+      let body: JsonObject;
+      try { body = objectValue(await response.json(), "delivery"); }
+      catch { options.onDeliveryStep?.({ status: "unrecoverable error", message: "Coordinator returned an invalid delivery response." }); throw new Error("Invalid QueryMint delivery response"); }
+      if (typeof body.queryId !== "string" || body.queryId.toLowerCase() !== event.args.queryId.toLowerCase() ||
+        typeof body.transactionHash !== "string" || body.transactionHash.toLowerCase() !== input.transactionHash.toLowerCase() ||
+        typeof body.blockNumber !== "string" || body.blockNumber !== receipt.blockNumber.toString() ||
+        !Array.isArray(body.records) || body.records.length === 0 || body.records.some((value) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return true;
+          const record = value as JsonObject;
+          return !isAddress(String(record.publisher), { strict: false }) || !/^0x[0-9a-fA-F]{64}$/.test(String(record.datasetId)) ||
+            !/^0x[0-9a-fA-F]{64}$/.test(String(record.recordHash)) || !Object.hasOwn(record, "payload");
+        })) {
+        options.onDeliveryStep?.({ status: "unrecoverable error", message: "Coordinator delivery response did not match the confirmed settlement." });
+        throw new Error("Invalid QueryMint delivery response");
+      }
+      const result: QueryMintDelivery = { transactionHash: input.transactionHash, receipt, queryId: event.args.queryId,
+        blockNumber: body.blockNumber, records: body.records as QueryMintDelivery["records"] };
       options.onDeliveryStep?.({ status: "confirmed", message: "Delivery authorization verified and records released." });
       return result;
     },
@@ -157,8 +316,8 @@ export function createQueryMint(options: CreateQueryMintOptions) {
       const quote = await this.refreshQuote(input);
       if (quote.approvalsMissing?.length) throw new Error(`Publisher approvals are still required for: ${quote.approvalsMissing.join(", ")}`);
       if (quote.settlementAddress.toLowerCase() !== options.settlementAddress.toLowerCase()) throw new Error("Quote settlement address does not match SDK configuration");
-      const chainId = await options.walletClient.getChainId();
-      if (chainId !== 1874 || quote.manifest.token.toLowerCase() !== WHITECHAIN_USDT.toLowerCase()) {
+      const [chainId, publicChainId] = await Promise.all([options.walletClient.getChainId(), options.publicClient.getChainId()]);
+      if (chainId !== 1874 || publicChainId !== 1874 || quote.manifest.token.toLowerCase() !== WHITECHAIN_USDT.toLowerCase()) {
         throw new Error("Quote or wallet is not configured for Whitechain Sepolia USDT");
       }
       const alreadySettled = await options.publicClient.readContract({ address: options.settlementAddress, abi: settlementStateAbi, functionName: "settledQueries", args: [quote.manifest.queryId] });

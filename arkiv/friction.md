@@ -6,9 +6,9 @@
 - Query pagination supports ordered indexed-key traversal with `.orderBy(asc("$key")).limit(n)` and a keyset continuation predicate `gt("$key", key(lastKey))`. The implementation caps page size at 100.
 - A shared category query is needed for multiple publishers. The returned Arkiv `$owner` must be checked against the publisher registered for the returned on-chain dataset ID.
 
-## Still unverified on Rabdi
+## Live status and remaining verification
 
-The checked-in roundtrip script can write two synthetic publisher datasets and four encrypted records, query them in pages, check owner attribution, verify hashes, and decrypt locally. It has not been executed against Rabdi because no Arkiv access key or publisher signing keys were provided. Actual endpoint behavior, indexing delay, expiry semantics, and transaction-cost observations therefore remain pending. No testnet success is claimed.
+The project owner reports successful Rabdi publishing for two publishers and four encrypted records. On 2026-11-07 the production coordinator returned both active datasets and a quote matching four records; its discovery path performs owner and current on-chain-policy checks. This turn did not submit Arkiv writes or query the Arkiv indexer directly. Indexing delay, long-term expiry behavior, and live transaction cost remain unmeasured here. The reproducible roundtrip script remains useful for a fresh isolated test, but must not be pointed at the existing publisher data for a write.
 
 ## Improvement request for Arkiv
 

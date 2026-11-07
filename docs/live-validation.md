@@ -1,6 +1,22 @@
 # QueryMint live validation
 
-Updated: 2026-11-06 (Milestone 6 final preparation). This checklist separates local tests, local fork simulations, read-only RPC observations, and live state changes. No Whitechain or Arkiv state-changing transaction/entity write has been submitted, and no private or access key was printed or copied.
+## Current production smoke check (2026-11-07)
+
+This section supersedes conflicting older snapshots below for current production discovery status. The historical entries remain for audit trail and are not current-state claims.
+
+| Test | Network | Actual result | Reference | Status | Remaining issue |
+|---|---|---|---|---|---|
+| Coordinator health | Railway production | HTTP 200, `{"ok":true}`. | `https://querymint-production.up.railway.app/health` | PASS, READ ONLY | Health is liveness only. |
+| Publisher discovery | Railway + Arkiv/Whitechain reads | HTTP 200; two publisher profiles returned. | `GET /publishers` | PASS, READ ONLY | Does not independently prove indexer completeness. |
+| Dataset discovery | Railway + Arkiv/Whitechain reads | HTTP 200; two active datasets returned for two distinct publishers. | `GET /datasets` | PASS, READ ONLY | Current policies/grants should be rechecked before a live presentation. |
+| Buyer quote | Railway + Arkiv/Whitechain reads | HTTP 201; `defi` query returned 4 matching/eligible records, 2 allocations with 2 records each, and a coordinator signature. Allocation payout sum equaled manifest total of 4,000,000 USDT base units (4 USDT at 6 decimals); EIP-712 recovery matched the configured public coordinator address. | `POST /query/quote`; no token approval or transaction | PASS, READ ONLY | The quote is ephemeral coordinator state; request a fresh quote for payment. |
+| Marketplace CORS | Vercel origin to Railway | `OPTIONS /datasets` returned 204 and allowed the marketplace origin for GET/POST/OPTIONS. | Production HTTP preflight | PASS, READ ONLY | SDK demo origin was not verified. |
+| Production browser UI | Vercel | Not inspected. Computer Use could not establish a confident current browser URL and stopped the UI session. A direct HTTP request to the provided marketplace URL redirected to Vercel login/SSO, so the page is not anonymously accessible at that URL. | Provided marketplace deployment URL | BLOCKED | Confirm Vercel deployment protection settings or provide the intended public production domain, then verify marketplace and SDK demo manually. |
+| Production deployment revision/configuration | Railway/Vercel | Hosting dashboards and deployment metadata were not accessible, so deployed commit and private environment settings could not be verified. | None | NOT VERIFIED | Operator should verify current commit and env names in hosting dashboards without copying secret values. |
+
+The read-only local `.env` configuration audit compared values in memory and emitted only boolean checks. Coordinator signer key/address matched the expected public coordinator address; Arkiv access key and a 32-byte hex encryption key were present; settlement address, USDT address, deployment block, Whitechain RPC host, and Vite settlement address matched expected public settings. The local CORS list did not include the current marketplace origin and the local Vite coordinator URL did not equal the production URL. No local `.env` values were changed. This does not reveal or establish Railway's environment configuration; set production Vercel/Railway values in their dashboards and verify through behavior.
+
+Historical snapshot: 2026-11-06 (Milestone 6 final preparation). This checklist separates local tests, local fork simulations, read-only RPC observations, and live state changes at that stage. No Whitechain or Arkiv state-changing transaction/entity write was submitted during that preparation stage, and no private or access key was printed or copied.
 
 | Test name | Network | Actual result | Transaction/entity reference | Status | Remaining issue |
 |---|---|---|---|---|---|

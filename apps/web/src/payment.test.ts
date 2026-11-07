@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, parseAbiItem } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { createQueryMint, type QueryMintQuote } from "@querymint/sdk";
+import { hashAllocations, hashResultRoot, queryManifestTypes, type Allocation } from "@querymint/shared";
 
 const buyer = "0x1111111111111111111111111111111111111111" as const;
 const publisher = "0x2222222222222222222222222222222222222222" as const;
-const coordinator = "0x3333333333333333333333333333333333333333" as const;
+const coordinatorAccount = privateKeyToAccount(`0x${"33".repeat(32)}` as const);
+const coordinator = coordinatorAccount.address;
 const settlement = "0x4444444444444444444444444444444444444444" as const;
 const datasetId = `0x${"55".repeat(32)}` as const;
 const queryId = `0x${"66".repeat(32)}` as const;
-const resultRoot = `0x${"77".repeat(32)}` as const;
+const recordHash = `0x${"99".repeat(32)}` as const;
+const allocation = { publisher, datasetId, publisherNonce: 0n, policyNonce: 0n, grantNonce: 0n,
+  recordCount: 1, recordHashes: [recordHash], payoutAmount: 1_000_000n, publisherSignature: "0x" as const } satisfies Allocation;
+const resultRoot = hashResultRoot([allocation]);
 const digest = `0x${"88".repeat(32)}` as const;
 const approvalHash = `0x${"aa".repeat(32)}` as const;
 const settlementHash1 = `0x${"bb".repeat(32)}` as const;
@@ -23,7 +29,7 @@ const receipt = {
   }],
 } as any;
 
-function makeHarness(options: { allowance?: bigint; failFirstSettlement?: boolean; expired?: boolean; invalidPolicy?: boolean } = {}) {
+async function makeHarness(options: { allowance?: bigint; failFirstSettlement?: boolean; expired?: boolean; invalidPolicy?: boolean; badDelivery?: boolean; wrongPublicChain?: boolean; invalidSignature?: boolean } = {}) {
   let allowance = options.allowance ?? 0n;
   const calls: string[] = [];
   const stages: Array<{ stage: string; status: string }> = [];
@@ -42,6 +48,7 @@ function makeHarness(options: { allowance?: bigint; failFirstSettlement?: boolea
     signTypedData: async () => { signedDelivery = true; return `0x${"11".repeat(65)}`; },
   } as any;
   const publicClient = {
+    getChainId: async () => options.wrongPublicChain ? 1 : 1874,
     getBlock: async () => ({ timestamp: options.expired ? 2_000n : 100n }),
     readContract: async ({ functionName }: { functionName: string }) => {
       if (functionName === "settledQueries") return false;
@@ -59,23 +66,30 @@ function makeHarness(options: { allowance?: bigint; failFirstSettlement?: boolea
     },
     getTransactionReceipt: async () => receipt,
   } as any;
-  const manifest = {
-    queryId, buyer, coordinator, token: "0xcedfb56113143d55b2358b8cfbb0deb5ad2f55a7", totalAmount: 1_000_000n,
-    deadline: 1_000n, resultRoot, allocations: [{ publisher, datasetId, publisherNonce: 0n, policyNonce: 0n, grantNonce: 0n,
-      recordCount: 1, recordHashes: [`0x${"99".repeat(32)}`], payoutAmount: 1_000_000n, publisherSignature: "0x" }], coordinatorSignature: "0x",
-  } as any;
-  const quote = { quoteId: queryId, manifest, settlementAddress: settlement, records: [], breakdown: [] } as QueryMintQuote;
+  const domain = { name: "QueryMint" as const, version: "1" as const, chainId: 1874 as const, verifyingContract: settlement };
+  const unsignedManifest = {
+    queryId, buyer, coordinator, token: "0xcedfb56113143d55b2358b8cfbb0deb5ad2f55a7" as const, totalAmount: 1_000_000n,
+    deadline: 1_000n, resultRoot, allocations: [allocation],
+  };
+  const coordinatorSignature = await coordinatorAccount.signTypedData({ domain, types: queryManifestTypes, primaryType: "QueryManifest",
+    message: { ...unsignedManifest, allocationsHash: hashAllocations(domain, unsignedManifest.allocations) } });
+  const manifest = { ...unsignedManifest, coordinatorSignature };
+  const refreshedManifest = options.invalidSignature ? { ...manifest, coordinatorSignature: `0x${"ff".repeat(65)}` } : manifest;
+  const quote = { quoteId: queryId, manifest, settlementAddress: settlement,
+    records: [{ publisher, datasetId, recordHash, preview: "preview" }], totalMatchingRecords: 1, eligibleRecords: 1, searchComplete: true,
+    breakdown: [{ publisher, datasetId, recordCount: 1, pricePerRecord: "1000000", payoutAmount: "1000000" }], publisherApprovalRequests: [] } as QueryMintQuote;
   const sdk = createQueryMint({ apiUrl: "http://coordinator", settlementAddress: settlement, walletClient, publicClient,
     fetch: async (_input, init) => init?.method === "POST"
-      ? (deliveryRequests++, new Response(JSON.stringify({ queryId, transactionHash: settlementHash2, records: [{ id: "r1" }], blockNumber: "123" }), { status: 200 }))
-      : new Response(JSON.stringify({ manifest: { ...manifest, totalAmount: "1000000", deadline: "1000", allocations: manifest.allocations.map((a: any) => ({ ...a, publisherNonce: "0", policyNonce: "0", grantNonce: "0", payoutAmount: "1000000" })) }, approvalsMissing: [] }), { status: 200 }),
+      ? (deliveryRequests++, new Response(JSON.stringify({ queryId: options.badDelivery ? `0x${"00".repeat(32)}` : queryId,
+        transactionHash: settlementWrites === 1 ? settlementHash1 : settlementHash2, records: [{ publisher, datasetId, recordHash, payload: { value: "licensed" } }], blockNumber: "123" }), { status: 200 }))
+      : new Response(JSON.stringify({ quoteId: queryId, manifest: { ...refreshedManifest, totalAmount: "1000000", deadline: "1000", allocations: refreshedManifest.allocations.map((a: any) => ({ ...a, publisherNonce: "0", policyNonce: "0", grantNonce: "0", payoutAmount: "1000000" })) }, approvalsMissing: [] }), { status: 200 }),
     onPaymentStep: (step) => stages.push({ stage: step.stage, status: step.status }),
   });
   return { sdk, quote, calls, stages, get signedDelivery() { return signedDelivery; }, get deliveryRequests() { return deliveryRequests; } };
 }
 
 test("exact approval confirms before settlement and delivery follows confirmed receipt", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   const result = await h.sdk.pay({ quote: h.quote });
   assert.deepEqual(h.calls, ["approve", "settle"]);
   assert.equal(result.records.length, 1);
@@ -86,7 +100,7 @@ test("exact approval confirms before settlement and delivery follows confirmed r
 });
 
 test("approval remains confirmed when settlement reverts and retry does not approve again", async () => {
-  const h = makeHarness({ failFirstSettlement: true });
+  const h = await makeHarness({ failFirstSettlement: true });
   await assert.rejects(h.sdk.pay({ quote: h.quote }), /Settlement transaction failed/);
   assert.ok(h.stages.some((s) => s.stage === "approval" && s.status === "confirmed"));
   assert.ok(h.stages.some((s) => s.stage === "settlement" && s.status === "failed"));
@@ -96,33 +110,59 @@ test("approval remains confirmed when settlement reverts and retry does not appr
 });
 
 test("sufficient existing allowance skips approval", async () => {
-  const h = makeHarness({ allowance: 1_000_000n });
+  const h = await makeHarness({ allowance: 1_000_000n });
   await h.sdk.pay({ quote: h.quote });
   assert.deepEqual(h.calls, ["settle"]);
   assert.ok(h.stages.some((s) => s.stage === "approval" && s.status === "skipped"));
 });
 
 test("expired or changed authorization is rejected before any transaction", async () => {
-  const h = makeHarness({ expired: true });
+  const h = await makeHarness({ expired: true });
   await assert.rejects(h.sdk.pay({ quote: h.quote }), /expired/i);
   assert.deepEqual(h.calls, []);
-  const changed = makeHarness({ invalidPolicy: true });
+  const changed = await makeHarness({ invalidPolicy: true });
   await assert.rejects(changed.sdk.pay({ quote: changed.quote }), /authorization changed/i);
   assert.deepEqual(changed.calls, []);
 });
 
+test("payment rejects a public client pointed at another chain before any transaction", async () => {
+  const h = await makeHarness({ wrongPublicChain: true });
+  await assert.rejects(h.sdk.pay({ quote: h.quote }), /Whitechain Sepolia/);
+  assert.deepEqual(h.calls, []);
+});
+
+test("payment rejects a bad coordinator signature before any transaction", async () => {
+  const h = await makeHarness({ invalidSignature: true });
+  await assert.rejects(h.sdk.pay({ quote: h.quote }), /coordinator signature/);
+  assert.deepEqual(h.calls, []);
+});
+
 test("delivery is not requested if settlement receipt fails", async () => {
-  const h = makeHarness({ failFirstSettlement: true });
+  const h = await makeHarness({ failFirstSettlement: true });
   await assert.rejects(h.sdk.pay({ quote: h.quote }));
   assert.equal(h.calls.includes("settle"), true);
   assert.ok(!h.stages.some((s) => s.stage === "settlement" && s.status === "confirmed"));
 });
 
 test("delivery recovery requests buyer authorization after validating a successful receipt", async () => {
-  const h = makeHarness();
+  const h = await makeHarness();
   const result = await h.sdk.deliver({ transactionHash: settlementHash2 });
   assert.equal(result.records.length, 1);
   assert.equal(h.signedDelivery, true);
   assert.equal(h.deliveryRequests, 1);
   assert.deepEqual(h.calls, [], "recovery must not submit approval or settlement transactions");
+});
+
+test("delivery rejects a coordinator response for a different query", async () => {
+  const h = await makeHarness({ badDelivery: true });
+  await assert.rejects(h.sdk.deliver({ transactionHash: settlementHash2 }), /Invalid QueryMint delivery response/);
+  assert.equal(h.deliveryRequests, 1);
+  assert.deepEqual(h.calls, [], "delivery recovery must not submit payment transactions");
+});
+
+test("quote rejects malformed successful JSON instead of coercing missing fields", async () => {
+  const sdk = createQueryMint({ apiUrl: "http://coordinator", settlementAddress: settlement,
+    walletClient: { account: { address: buyer } } as any, publicClient: {} as any,
+    fetch: async () => new Response(JSON.stringify({ quoteId: queryId, manifest: {} }), { status: 201 }) });
+  await assert.rejects(sdk.quote({ where: { category: "defi" }, limit: 5 }), /Invalid QueryMint response/);
 });
