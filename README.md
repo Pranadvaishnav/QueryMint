@@ -7,7 +7,7 @@ QueryMint lets buyers query publisher-owned Arkiv datasets in one request, revie
 - Whitechain Sepolia (chain ID `1874`) is the settlement and publisher-policy network. The deployed QueryMintSettlement contract is `0xb40363F6F9C1bEECf386C5C8440A826Ed9b9c854`; official USDT is `0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7`.
 - Arkiv Rabdi (chain ID `7794095`) stores publisher-owned profiles, dataset manifests, and encrypted records.
 - The production coordinator API is `https://querymint-production.up.railway.app`.
-- The marketplace and publisher console deployment reported for the project is `https://web-rczjtwpqc-pranad.vercel.app`.
+- The marketplace and publisher console deployment reported for the project is `https://web-rczjtwpqc-pranad.vercel.app`where as, the SDK is `https://querymint-sdk-demo-nm6gowg56-pranad.vercel.app/`
 
 The owner has confirmed a live two-publisher settlement of 4 USDT total (2 USDT to each publisher), followed by buyer-authorized delivery of four records whose content hashes matched the signed manifest. The live validation log records that evidence and distinguishes it from local tests. In a read-only production smoke check on 2026-11-07, `/health`, `/publishers`, `/datasets`, and a buyer quote request succeeded; the quote contained four records across two allocations and totaled 4 USDT. The quote request did not approve or transfer tokens. Production browser UI inspection and access to Railway/Vercel deployment controls were unavailable in that pass.
 
